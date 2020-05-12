@@ -22,7 +22,24 @@ type client struct {
 	bucket  string
 }
 
-func Client(region, bucket string, dbUser, dbPassword, dbHost, dbPort, dbName string) (*client, error) {
+func GetDSN(dbUser, dbPassword, dbHost, dbPort, dbName string) string {
+	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", dbUser, dbPassword, dbHost, dbPort, dbName)
+}
+
+func (c *client) ConnectToDB(dbType, dsn string) (*sql.DB, error) {
+
+	db, err := sql.Open(dbType, dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	c.db = db
+
+	return db, nil
+
+}
+
+func Client(region, bucket string) (*client, error) {
 
 	c := client{region: region, bucket: bucket}
 
@@ -33,15 +50,6 @@ func Client(region, bucket string, dbUser, dbPassword, dbHost, dbPort, dbName st
 	}
 
 	c.session = s
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", dbUser, dbPassword, dbHost, dbPort, dbName)
-	db, err := sql.Open("mysql", dsn)
-
-	if err != nil {
-		return nil, err
-	}
-
-	c.db = db
 
 	return &c, nil
 
