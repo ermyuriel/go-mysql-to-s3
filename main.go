@@ -47,6 +47,31 @@ func Client(region, bucket string, dbUser, dbPassword, dbHost, dbPort, dbName st
 
 }
 
+func (c client) StringToS3(str, path string, encoding, contentType string, zip bool) error {
+	var w io.Writer
+	var buffer bytes.Buffer
+
+	if zip {
+		w = gzip.NewWriter(&buffer)
+
+	} else {
+		w = bufio.NewWriter(&buffer)
+
+	}
+
+	io.WriteString(w, str)
+
+	if zip {
+		w.(*gzip.Writer).Close()
+	} else {
+		w.(*bufio.Writer).Flush()
+	}
+
+	_, err := c.uploadS3(path, buffer.Bytes(), encoding, contentType)
+
+	return err
+}
+
 func (c client) QueryToS3(query, path, separator, newLine string, encoding, contentType string, zip bool) error {
 
 	csv, err := c.queryToCSV(query, separator, newLine, zip)
