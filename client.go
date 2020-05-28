@@ -12,7 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
-type client struct {
+type Client struct {
 	session  *session.Session
 	db       *sql.DB
 	region   string
@@ -20,9 +20,9 @@ type client struct {
 	uploader *s3manager.Uploader
 }
 
-func Client(s3Region string, db *sql.DB) (*client, error) {
+func GetClient(s3Region string, db *sql.DB) (*Client, error) {
 
-	c := client{region: s3Region}
+	c := Client{region: s3Region}
 
 	s, err := session.NewSession(&aws.Config{Region: aws.String(s3Region)})
 
@@ -40,11 +40,11 @@ func Client(s3Region string, db *sql.DB) (*client, error) {
 
 }
 
-func (c *client) Close() error {
+func (c *Client) Close() error {
 	return c.db.Close()
 }
 
-func (c client) QueryToS3(qf QueryFile, omitEmpty bool) error {
+func (c Client) QueryToS3(qf QueryFile, omitEmpty bool) error {
 	var w io.Writer
 	var buffer bytes.Buffer
 
@@ -144,7 +144,7 @@ func (c client) QueryToS3(qf QueryFile, omitEmpty bool) error {
 
 }
 
-func (c client) StringToS3(qf QueryFile) error {
+func (c Client) StringToS3(qf QueryFile) error {
 	var w io.Writer
 	var buffer bytes.Buffer
 
@@ -163,7 +163,7 @@ func (c client) StringToS3(qf QueryFile) error {
 	return c.upload(qf, buffer)
 }
 
-func (c client) upload(qf QueryFile, buffer bytes.Buffer) error {
+func (c Client) upload(qf QueryFile, buffer bytes.Buffer) error {
 	_, err := c.uploader.Upload(&s3manager.UploadInput{
 		Bucket:               aws.String(qf.Bucket),
 		Key:                  aws.String(qf.Key),
