@@ -16,11 +16,11 @@ import (
 )
 
 type client struct {
-	session *session.Session
-	db      *sql.DB
-	region  string
-	bucket  string
-	reader  io.Reader
+	session  *session.Session
+	db       *sql.DB
+	region   string
+	bucket   string
+	uploader *s3manager.Uploader
 }
 
 func GetDSN(dbUser, dbPassword, dbHost, dbPort, dbName string) string {
@@ -41,7 +41,6 @@ func (c *client) ConnectToDB(dbType, dsn string) error {
 }
 
 func Client(region, bucket string) (*client, error) {
-	var buffer bytes.Buffer
 
 	c := client{region: region, bucket: bucket}
 
@@ -51,8 +50,9 @@ func Client(region, bucket string) (*client, error) {
 		return nil, err
 	}
 
+	c.uploader = s3manager.NewUploader(s)
+
 	c.session = s
-	c.reader = &buffer
 
 	return &c, nil
 
@@ -83,37 +83,52 @@ func (c client) StringToS3(str, path string, encoding, contentType string, zip b
 	return err
 }
 
-func (c client) QueryToS3(query, path, separator, newLine string, encoding, contentType string, zip bool) error {
+func (c client) QueryToS3(query, path, separator, newLine string, contentEncoding, contentType string, zip bool, skipEmpty bool) error {
 
-	return c.queryToCSV(query, separator, newLine, zip, path, encoding, contentType)
+	r, rc, err := c.queryToCSV(query, separator, newLine, zip)
+
+	if rc == 0 && skipEmpty {
+		return nil
+	}
+
+	_, err = c.uploader.Upload(&s3manager.UploadInput{
+		Bucket:               aws.String(c.bucket),
+		Key:                  aws.String(path),
+		ACL:                  aws.String("private"),
+		Body:                 r,
+		ContentType:          aws.String(contentType),
+		ContentEncoding:      aws.String(contentEncoding),
+		ServerSideEncryption: aws.String("AES256"),
+	})
+
+	return err
 
 }
 
-func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, contentEncoding, contentType string) error {
+func (c client) queryToCSV(q string, separator, newLine string, zip bool) (io.Reader, int, error) {
 	var w io.Writer
-
-	uploader := s3manager.NewUploader(c.session)
+	var buffer bytes.Buffer
 
 	if zip {
-		w = gzip.NewWriter(c.reader.(*bytes.Buffer))
+		w = gzip.NewWriter(&buffer)
 		defer w.(*gzip.Writer).Close()
 
 	} else {
-		w = bufio.NewWriter(c.reader.(*bytes.Buffer))
+		w = bufio.NewWriter(&buffer)
 		defer w.(*bufio.Writer).Flush()
 
 	}
 
 	rows, err := c.db.Query(q)
 	if err != nil {
-		return err
+		return &buffer, 0, err
 	}
 	defer rows.Close()
 
 	headers, err := rows.Columns()
 
 	if err != nil {
-		return err
+		return &buffer, 0, err
 	}
 
 	lh := len(headers)
@@ -121,22 +136,22 @@ func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, 
 	for _, v := range headers[:lh-1] {
 		_, err = io.WriteString(w, v)
 		if err != nil {
-			return err
+			return &buffer, 0, err
 		}
 		_, err = io.WriteString(w, separator)
 		if err != nil {
-			return err
+			return &buffer, 0, err
 		}
 
 	}
 
 	_, err = io.WriteString(w, headers[lh-1])
 	if err != nil {
-		return err
+		return &buffer, 0, err
 	}
 	_, err = io.WriteString(w, newLine)
 	if err != nil {
-		return err
+		return &buffer, 0, err
 	}
 
 	nullRow := make([]sql.NullString, lh)
@@ -152,18 +167,18 @@ func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, 
 		rc++
 		err := rows.Scan(aux...)
 		if err != nil {
-			return err
+			return &buffer, rc, err
 		}
 		for _, v := range nullRow[:lh-1] {
 			if v.Valid {
 				_, err = io.WriteString(w, v.String)
 				if err != nil {
-					return err
+					return &buffer, rc, err
 				}
 			}
 			_, err = io.WriteString(w, separator)
 			if err != nil {
-				return err
+				return &buffer, rc, err
 			}
 
 		}
@@ -171,36 +186,22 @@ func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, 
 		if nullRow[lh-1].Valid {
 			_, err = io.WriteString(w, nullRow[lh-1].String)
 			if err != nil {
-				return err
+				return &buffer, rc, err
 			}
 		}
 
 		_, err = io.WriteString(w, newLine)
 		if err != nil {
-			return err
+			return &buffer, rc, err
 		}
 
 	}
 
-	if rc == 0 {
-		return nil
-	}
-
-	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket:               aws.String(c.bucket),
-		Key:                  aws.String(path),
-		ACL:                  aws.String("private"),
-		Body:                 c.reader,
-		ContentType:          aws.String(contentType),
-		ContentEncoding:      aws.String(contentEncoding),
-		ServerSideEncryption: aws.String("AES256"),
-	})
-
-	return err
+	return &buffer, rc, err
 
 }
 
-func (c client) Close() error {
+func (c *client) Close() error {
 	return c.db.Close()
 }
 
