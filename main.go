@@ -16,12 +16,11 @@ import (
 )
 
 type client struct {
-	session  *session.Session
-	db       *sql.DB
-	region   string
-	bucket   string
-	reader   io.Reader
-	uploader *s3manager.Uploader
+	session *session.Session
+	db      *sql.DB
+	region  string
+	bucket  string
+	reader  io.Reader
 }
 
 func GetDSN(dbUser, dbPassword, dbHost, dbPort, dbName string) string {
@@ -54,7 +53,6 @@ func Client(region, bucket string) (*client, error) {
 
 	c.session = s
 	c.reader = &buffer
-	c.uploader = s3manager.NewUploader(s)
 
 	return &c, nil
 
@@ -93,6 +91,8 @@ func (c client) QueryToS3(query, path, separator, newLine string, encoding, cont
 
 func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, contentEncoding, contentType string) error {
 	var w io.Writer
+
+	uploader := s3manager.NewUploader(c.session)
 
 	if zip {
 		w = gzip.NewWriter(c.reader.(*bytes.Buffer))
@@ -147,8 +147,9 @@ func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, 
 		aux[i] = &nullRow[i]
 	}
 
+	rc := 0
 	for rows.Next() {
-
+		rc++
 		err := rows.Scan(aux...)
 		if err != nil {
 			return err
@@ -181,7 +182,11 @@ func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, 
 
 	}
 
-	_, err = c.uploader.Upload(&s3manager.UploadInput{
+	if rc == 0 {
+		return nil
+	}
+
+	_, err = uploader.Upload(&s3manager.UploadInput{
 		Bucket:               aws.String(c.bucket),
 		Key:                  aws.String(path),
 		ACL:                  aws.String("private"),
