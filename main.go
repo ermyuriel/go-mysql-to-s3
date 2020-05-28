@@ -5,41 +5,44 @@ import (
 	"bytes"
 	"compress/gzip"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	_ "github.com/go-sql-driver/mysql"
 )
 
 type client struct {
-	session *session.Session
-	db      *sql.DB
-	region  string
-	bucket  string
+	session  *session.Session
+	db       *sql.DB
+	region   string
+	bucket   string
+	reader   io.Reader
+	uploader *s3manager.Uploader
 }
 
 func GetDSN(dbUser, dbPassword, dbHost, dbPort, dbName string) string {
 	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s", dbUser, dbPassword, dbHost, dbPort, dbName)
 }
 
-func (c *client) ConnectToDB(dbType, dsn string) (*sql.DB, error) {
+func (c *client) ConnectToDB(dbType, dsn string) error {
 
 	db, err := sql.Open(dbType, dsn)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	c.db = db
 
-	return db, nil
+	return nil
 
 }
 
 func Client(region, bucket string) (*client, error) {
+	var buffer bytes.Buffer
 
 	c := client{region: region, bucket: bucket}
 
@@ -50,6 +53,8 @@ func Client(region, bucket string) (*client, error) {
 	}
 
 	c.session = s
+	c.reader = &buffer
+	c.uploader = s3manager.NewUploader(s)
 
 	return &c, nil
 
@@ -75,62 +80,64 @@ func (c client) StringToS3(str, path string, encoding, contentType string, zip b
 		w.(*bufio.Writer).Flush()
 	}
 
-	_, err := c.uploadS3(path, buffer.Bytes(), encoding, contentType)
+	_, err := c.upload(path, buffer.Bytes(), encoding, contentType)
 
 	return err
 }
 
 func (c client) QueryToS3(query, path, separator, newLine string, encoding, contentType string, zip bool) error {
 
-	csv, err := c.queryToCSV(query, separator, newLine, zip)
+	return c.queryToCSV(query, separator, newLine, zip, path, encoding, contentType)
 
-	if err != nil {
-		return err
-	}
-
-	_, err = c.uploadS3(path, csv, encoding, contentType)
-
-	return err
 }
 
-func (c client) queryToCSV(q string, separator, newLine string, zip bool) ([]byte, error) {
+func (c client) queryToCSV(q string, separator, newLine string, zip bool, path, contentEncoding, contentType string) error {
 	var w io.Writer
-	var buffer bytes.Buffer
 
 	if zip {
-		w = gzip.NewWriter(&buffer)
+		w = gzip.NewWriter(c.reader.(*bytes.Buffer))
+		defer w.(*gzip.Writer).Close()
 
 	} else {
-		w = bufio.NewWriter(&buffer)
+		w = bufio.NewWriter(c.reader.(*bytes.Buffer))
+		defer w.(*bufio.Writer).Flush()
 
 	}
 
 	rows, err := c.db.Query(q)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
 
 	headers, err := rows.Columns()
 
 	if err != nil {
-		return nil, err
-	}
-
-	if len(headers) == 0 {
-		return nil, errors.New("no headers")
+		return err
 	}
 
 	lh := len(headers)
 
 	for _, v := range headers[:lh-1] {
-		io.WriteString(w, v)
-		io.WriteString(w, separator)
+		_, err = io.WriteString(w, v)
+		if err != nil {
+			return err
+		}
+		_, err = io.WriteString(w, separator)
+		if err != nil {
+			return err
+		}
 
 	}
 
-	io.WriteString(w, headers[lh-1])
-	io.WriteString(w, newLine)
+	_, err = io.WriteString(w, headers[lh-1])
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(w, newLine)
+	if err != nil {
+		return err
+	}
 
 	nullRow := make([]sql.NullString, lh)
 	aux := make([]interface{}, lh)
@@ -144,38 +151,55 @@ func (c client) queryToCSV(q string, separator, newLine string, zip bool) ([]byt
 
 		err := rows.Scan(aux...)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for _, v := range nullRow[:lh-1] {
 			if v.Valid {
-				io.WriteString(w, v.String)
+				_, err = io.WriteString(w, v.String)
+				if err != nil {
+					return err
+				}
 			}
-			io.WriteString(w, separator)
+			_, err = io.WriteString(w, separator)
+			if err != nil {
+				return err
+			}
 
 		}
 
 		if nullRow[lh-1].Valid {
-			io.WriteString(w, nullRow[lh-1].String)
+			_, err = io.WriteString(w, nullRow[lh-1].String)
+			if err != nil {
+				return err
+			}
 		}
 
-		io.WriteString(w, newLine)
+		_, err = io.WriteString(w, newLine)
+		if err != nil {
+			return err
+		}
 
 	}
 
-	if zip {
-		w.(*gzip.Writer).Close()
-	} else {
-		w.(*bufio.Writer).Flush()
-	}
+	_, err = c.uploader.Upload(&s3manager.UploadInput{
+		Bucket:               aws.String(c.bucket),
+		Key:                  aws.String(path),
+		ACL:                  aws.String("private"),
+		Body:                 c.reader,
+		ContentType:          aws.String(contentType),
+		ContentEncoding:      aws.String(contentEncoding),
+		ServerSideEncryption: aws.String("AES256"),
+	})
 
-	return buffer.Bytes(), nil
+	return err
+
 }
 
 func (c client) Close() error {
 	return c.db.Close()
 }
 
-func (c client) uploadS3(path string, bodyBytes []byte, contentEncoding, contentType string) (*s3.PutObjectOutput, error) {
+func (c client) upload(path string, bodyBytes []byte, contentEncoding, contentType string) (*s3.PutObjectOutput, error) {
 
 	return s3.New(c.session).PutObject(&s3.PutObjectInput{
 		Bucket:               aws.String(c.bucket),
