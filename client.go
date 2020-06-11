@@ -164,20 +164,27 @@ func (c Client) StringToS3(qf QueryFile) error {
 }
 
 func (c Client) upload(qf QueryFile, buffer bytes.Buffer) error {
+	var nb bytes.Buffer
 
+	ref := &nb
+	tee := io.TeeReader(&buffer, ref)
 	for _, key := range qf.Keys {
+
 		_, err := c.uploader.Upload(&s3manager.UploadInput{
 			Bucket:               aws.String(qf.Bucket),
 			Key:                  aws.String(key),
 			ACL:                  aws.String(qf.ACL),
-			Body:                 &buffer,
+			Body:                 tee,
 			ContentType:          aws.String(qf.ContentType),
 			ContentEncoding:      aws.String(qf.ContentEncoding),
 			ServerSideEncryption: aws.String(qf.ServerSideEncryption),
 		})
-		if err == nil {
+		if err != nil {
 			return err
 		}
+		var cnb bytes.Buffer
+		tee = io.TeeReader(ref, &cnb)
+		ref = &cnb
 	}
 	return nil
 }
