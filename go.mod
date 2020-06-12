@@ -1,4 +1,4 @@
-module mys3
+module github.com/ermyuriel/mys3
 
 go 1.14
 
